@@ -48,6 +48,9 @@ interface Resting { side: Side; price: number; size: number; block: number }
  * that side (`quoteInsideTicks` inside the touch), cancelling whatever we had resting. One request
  * in flight; a block that arrives while the previous one is still running is emitted as late.
  *
+ * `setRunning(false)` pauses the loop without stopping the process: blocks keep arriving and
+ * in-flight sends keep settling, but nothing is read from the model or posted.
+ *
  * Live sends are fire-and-forget: the block event carries the quote as `sent`; its receipt
  * (`placed` with an order id, or `reverted`) is applied when it turns up on a later block. Fills
  * come from the Trade log feed: a taker hit one of our resting orders. Dry runs simulate both:
@@ -66,6 +69,9 @@ export class Trader {
   private simId = 0;
   private position = { mon: 0, costUsd: 0 }; // signed inventory and its cost basis
   private totals: Totals = { blocks: 0, decisions: 0, quotes: 0, fills: 0, reverted: 0, lateBlocks: 0, jevUsd: 0, gasMon: 0, gasUsd: 0, realizedUsd: 0, pnlUsd: 0, pnlMon: 0, pnlPct: 0 };
+  /** While false the chain keeps feeding blocks, but nothing is read, decided or posted. */
+  private running = true;
+  private lastBlock = 0;
 
   constructor(
     private market: Market,
@@ -73,8 +79,22 @@ export class Trader {
     private onEvent: (e: BlockEvent, timing?: Timing) => void,
     private onFill: (block: number, fill: Fill) => void = () => {},
     private onQuote: (block: number, quote: Quote) => void = () => {},
+    private onControl: (running: boolean) => void = () => {},
   ) {
     mkdirSync("data", { recursive: true });
+  }
+
+  get isRunning() { return this.running; }
+
+  /**
+   * Stop or resume the loop. Both directions are edge-triggered: a repeated call is a no-op, so
+   * `POST /stop` twice does not produce two control events.
+   */
+  setRunning(running: boolean) {
+    if (this.running === running) return;
+    this.running = running;
+    console.log(`#${this.lastBlock} trading ${running ? "started" : "stopped"}`);
+    this.onControl(running);
   }
 
   /** Call once the market params are known. Without it `trades` in the state is all zeros and no fills are ever seen. */
@@ -84,8 +104,13 @@ export class Trader {
 
   async onBlock(block: number) {
     this.totals.blocks++;
+    this.lastBlock = block;
     this.confirmPending(block); // off the hot path: receipts for earlier blocks' sends
     if (this.totals.blocks % config.refreshBlocks === 0) this.market.refresh().catch(() => {}); // fee estimate + margin + vault check
+    // Stopped: the block still counts, in-flight sends still settle, but no read, no model call, no
+    // order. Deliberately not a `late` block: late means "too slow to answer in time", and a stopped
+    // bot answered nothing on purpose. Counting it would poison the latency stats the dashboard shows.
+    if (!this.running) return;
     if (this.busy) {
       this.totals.lateBlocks++;
       if (this.lastBook) this.emit(block, this.lastBook, null, null, true);
@@ -113,7 +138,7 @@ export class Trader {
       if (side) {
         decision.action = side;
         const cancel = [...this.orders.keys()].filter((id) => id > 0); // simulated orders have negative ids
-        quote = await this.market.send(block, side, config.tradeSizeMon, book, cancel, side !== wanted);
+        quote = await this.market.send(block, side, config.tradeSizeBase, book, cancel, side !== wanted);
         this.totals.quotes++;
         if (quote.status === "sim") {
           this.orders.clear(); // the simulated cancel
@@ -208,12 +233,12 @@ export class Trader {
 
   /** Would this order, and everything already resting on its side, keep us inside the cap and (live) inside margin funds? */
   private allowed(side: Side, book: Book) {
-    const size = config.tradeSizeMon;
+    const size = config.tradeSizeBase;
     const exposure = side === "buy" ? this.position.mon + this.restingMon("buy") + size : this.position.mon - this.restingMon("sell") - size;
-    if (Math.abs(exposure) > config.maxPositionMon) return false;
+    if (Math.abs(exposure) > config.maxPositionBase) return false;
     if (!this.market.wallet) return true;
     // Kuru debits margin when an order is placed, so the balance already excludes what is resting.
-    return side === "buy" ? this.market.margin.usdc >= size * book.ask : this.market.margin.mon >= size;
+    return side === "buy" ? this.market.margin.quote >= size * book.ask : this.market.margin.base >= size;
   }
 
   private buildState(block: number, book: Book): TradeState {
@@ -225,7 +250,7 @@ export class Trader {
     const depth: TradeState["depth"] = {};
     for (const [k, v] of Object.entries(book.depthBps)) depth[k + "bps"] = { bid: round(v.bid, 1), ask: round(v.ask, 1) };
     return {
-      market: "MON-USDC",
+      market: `${this.market.baseSymbol}-${this.market.quoteSymbol}`,
       block,
       horizonBlocks: H,
       blockMs: 300,

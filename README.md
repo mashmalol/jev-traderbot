@@ -1,6 +1,6 @@
 # jev-trader
 
-One decision every Monad block. A TypeSafe Jev model watches the Kuru MON-USDC order book and answers buy or sell every ~300 ms. Every block posts a real post-only limit order on that side, one tick inside the touch, replacing the last one. Fills happen when a taker hits it, so the bot earns the spread instead of paying it. A small server streams every block to the dashboard.
+One decision every Monad block. A TypeSafe Jev model watches the Kuru cbBTC-USDC order book and answers buy or sell every ~300 ms. Every block posts a real post-only limit order on that side, one tick inside the touch, replacing the last one. Fills happen when a taker hits it, so the bot earns the spread instead of paying it. A small server streams every block to the dashboard.
 
 ## Run
 
@@ -14,9 +14,10 @@ With no `PRIVATE_KEY` it dry-runs: real book, real decisions, simulated fills. S
 
 Deployed (dry run, mock model): https://jev-trader-production.up.railway.app
 
-- `GET /` snapshot: model, wallet, dryRun, latest block event
+- `GET /` snapshot: model, wallet, dryRun, pair, latest block event
 - `GET /history` last 1000 block events
-- `GET /events` SSE: `snapshot` on connect, then one `block` event per block, a `quote` event when a live order's receipt lands, a `fill` event when a taker hits a resting order, and a `ping` every 15 s
+- `POST /stop` and `POST /start` pause and resume the trading loop (the server, block feed and dashboard stay up)
+- `GET /events` SSE: `snapshot` on connect, then one `block` event per block, a `quote` event when a live order's receipt lands, a `fill` event when a taker hits a resting order, a `control` event when the loop is stopped or resumed, and a `ping` every 15 s
 
 Every event (see `src/trader.ts` for types):
 
@@ -31,7 +32,7 @@ Every event (see `src/trader.ts` for types):
       "totals": { "blocks": 3, "decisions": 3, "quotes": 3, "fills": 1, "reverted": 0, "lateBlocks": 0, "jevUsd": 0.000004, "gasMon": 0.107, "gasUsd": 0.0024, "realizedUsd": 0, "pnlUsd": -0.003, "pnlMon": -0.13, "pnlPct": -0.003 }
     }
 
-Every block the model is asked about the move over `HORIZON_BLOCKS` (default 100, ~30 s) and answers `buy` or `sell`. `quote` is the order that block put on the book: a post-only limit order of `TRADE_SIZE_MON` on that side, `QUOTE_INSIDE_TICKS` inside the touch (clamped to the touch when the spread is too tight), in one `batchUpdate` that also cancels everything we had resting (`cancel`). `hold` appears only with `decision.late: true`, when the model missed the block and nothing was posted. When the position cap (or, live, margin funds) blocks a side, the quote goes on the other side with `capped: true` and `probabilities` still show the model's call. `resting` is our size known to be on the book after this block. `upIn10` equals the buy probability.
+Every block the model is asked about the move over `HORIZON_BLOCKS` (default 100, ~30 s) and answers `buy` or `sell`. `quote` is the order that block put on the book: a post-only limit order of `TRADE_SIZE_BASE` on that side, `QUOTE_INSIDE_TICKS` inside the touch (clamped to the touch when the spread is too tight), in one `batchUpdate` that also cancels everything we had resting (`cancel`). `hold` appears only with `decision.late: true`, when the model missed the block and nothing was posted. When the position cap (or, live, margin funds) blocks a side, the quote goes on the other side with `capped: true` and `probabilities` still show the model's call. `resting` is our size known to be on the book after this block. `upIn10` equals the buy probability.
 
 Live sends are fired and forgotten, so the `block` event carries the **intent**: `status: "sent"`, `gasMon` is `gasLimit x (last known base fee + priority)`. Monad charges the gas limit, so that is the real cost whether the order lands or not. The receipt arrives a block or two later as its own SSE event:
 
@@ -69,3 +70,4 @@ dry run with the mock model: read p50 18 ms, whole loop p50 100 ms (80 ms of it 
 
     bun run scripts/bench-read.ts     # book reader vs the SDK: exactness and latency
     bun run scripts/dry-encode.ts     # signs a buy and a sell offline, asserts the calldata matches the SDK
+# jev-traderbot

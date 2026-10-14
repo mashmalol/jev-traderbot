@@ -11,8 +11,10 @@ await market.init();
 const model = createModel();
 
 const server = startServer(
-  { model: model.name, wallet: market.address, dryRun: config.dryRun, market: config.market, startedAt: Date.now() },
+  { model: model.name, wallet: market.address, dryRun: config.dryRun, market: config.market, startedAt: Date.now(), pair: `${market.baseSymbol}/${market.quoteSymbol}` },
   () => trader.history,
+  // The trader owns the flag; the server reads and flips it. Lazy, so it wires up before `trader` exists.
+  { running: () => trader.isRunning, setRunning: (running) => trader.setRunning(running) },
 );
 const trader = new Trader(
   market,
@@ -34,8 +36,9 @@ const trader = new Trader(
     server.broadcastQuote(block, quote);
     if (quote.status !== "placed") console.log(`#${block} ${quote.status.toUpperCase()} ${quote.side} @ ${quote.price.toFixed(6)} gas ${quote.gasMon.toFixed(6)} MON ${quote.txHash}`);
   },
+  (running) => server.broadcastControl(running),
 );
 trader.attachTradeFeed(log10(market.params.sizePrecision));
 
-console.log(`jev-trader · model=${model.name} · post-only ${config.quoteInsideTicks} tick inside the touch · horizon ${config.horizonBlocks} blocks · ${config.dryRun ? "DRY RUN" : `wallet ${market.address}`} · market ${config.market} · read ${config.readRpcUrl} · :${config.port}`);
+console.log(`jev-trader · model=${model.name} · ${market.baseSymbol}/${market.quoteSymbol} · post-only ${config.quoteInsideTicks} tick inside the touch · size ${config.tradeSizeBase} ${market.baseSymbol} · horizon ${config.horizonBlocks} blocks · ${config.dryRun ? "DRY RUN" : `wallet ${market.address}`} · market ${config.market} · read ${config.readRpcUrl} · :${config.port}`);
 startBlockFeed((block) => trader.onBlock(block));

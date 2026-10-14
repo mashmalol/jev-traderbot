@@ -24,6 +24,7 @@ type Action =
   | { type: "block"; event: BlockEvent }
   | { type: "fill"; block: number; fill: Fill }
   | { type: "quote"; block: number; quote: Quote }
+  | { type: "control"; running: boolean }
   | { type: "connection"; connection: ConnectionState };
 
 const initialState: State = {
@@ -32,6 +33,7 @@ const initialState: State = {
   latest: null,
   connection: "connecting",
   avgLatencyMs: 0,
+  running: true, // the bot boots running; only a `control` event or a snapshot can turn this off
   latSum: 0,
   latCount: 0,
 };
@@ -57,6 +59,12 @@ function reducer(state: State, action: Action): State {
     case "connection":
       return state.connection === action.connection ? state : { ...state, connection: action.connection };
 
+    case "control": {
+      if (state.running === action.running) return state;
+      // meta carries running too, so the wallet/model pills and any meta consumer stay in step.
+      return { ...state, running: action.running, meta: state.meta ? { ...state.meta, running: action.running } : state.meta };
+    }
+
     case "snapshot": {
       const history = Array.isArray(action.history) ? action.history : [];
       const events = history.length > CAP ? history.slice(history.length - CAP) : history;
@@ -69,8 +77,10 @@ function reducer(state: State, action: Action): State {
           latCount++;
         }
       }
+      const meta = action.meta ?? state.meta;
       return {
-        meta: action.meta ?? state.meta,
+        meta,
+        running: meta ? meta.running : state.running,
         events,
         latest: events.length ? events[events.length - 1] : null,
         connection: "live",
@@ -181,8 +191,10 @@ function parseMeta(raw: Record<string, unknown> | null): Meta | null {
     model: typeof raw.model === "string" ? raw.model : "",
     wallet: typeof raw.wallet === "string" ? raw.wallet : null,
     dryRun: Boolean(raw.dryRun),
-    market: typeof raw.market === "string" ? raw.market : "MON/USDC",
+    market: typeof raw.market === "string" ? raw.market : "",
     startedAt: typeof raw.startedAt === "number" ? raw.startedAt : Date.now(),
+    running: raw.running !== false, // absent means an older backend, which can only be running
+    pair: typeof raw.pair === "string" ? raw.pair : "MON/USDC",
   };
 }
 
@@ -192,7 +204,8 @@ function parseMeta(raw: Record<string, unknown> | null): Meta | null {
  * Connects to `${apiUrl}/events` and handles: `snapshot` (meta + history),
  * `block` (append, deduped by block number, capped at 1000), `quote`
  * ({ block, quote } -> replaces that block's quote once its receipt lands), `fill`
- * ({ block, fill } -> a taker hit our resting order in that block) and `ping` (liveness).
+ * ({ block, fill } -> a taker hit our resting order in that block), `control`
+ * ({ running } -> the loop was stopped or resumed, from any client) and `ping` (liveness).
  * Reconnects with 1s -> 10s backoff, surfacing `connection`.
  */
 export function useFeed(apiUrl: string): FeedState {
@@ -284,6 +297,12 @@ export function useFeed(apiUrl: string): FeedState {
       });
       handle("ping", () => {
         dispatch({ type: "connection", connection: "live" });
+      });
+      // Another client (or curl) flipped the loop: reflect it everywhere, not just for whoever clicked.
+      handle("control", (data) => {
+        const d = (data ?? {}) as { running?: boolean };
+        if (typeof d.running !== "boolean") return;
+        dispatch({ type: "control", running: d.running });
       });
     }
 

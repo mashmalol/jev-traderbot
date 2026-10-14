@@ -64,14 +64,17 @@ const ZERO_ADDRESS = ethers.constants.AddressZero;
 
 interface Pending { block: number; quote: Quote; gasLimit: ethers.BigNumber }
 
-/** Kuru MON-USDC market: read the book, post one limit order per block, confirm asynchronously. */
+/** Kuru market: read the book, post one limit order per block, confirm asynchronously. */
 export class Market {
   readonly provider = new ethers.providers.StaticJsonRpcProvider(config.rpcUrl, config.chainId);
   /** null in a dry run (no key, or DRY_RUN=true): nothing is signed, nothing is sent. */
   readonly wallet = config.dryRun ? null : new ethers.Wallet(config.privateKey!, this.provider);
   params!: Kuru.MarketParams; // public so scripts can build txs without init()
   /** Margin account balances, refreshed every `config.refreshBlocks`. Limit orders draw from here. */
-  margin = { mon: 0, usdc: 0 };
+  margin = { base: 0, quote: 0 };
+  /** Tickers, read once at init. The native asset has no symbol() to call, so it is a constant. */
+  baseSymbol = "";
+  quoteSymbol = "";
   private iface = new ethers.utils.Interface(OrderBookAbi.abi);
   private marginIface = new ethers.utils.Interface(MarginAccountAbi.abi);
   private nonce = 0;
@@ -87,6 +90,10 @@ export class Market {
 
   async init() {
     this.params = await Kuru.ParamFetcher.getMarketParams(this.provider, config.market);
+    [this.baseSymbol, this.quoteSymbol] = await Promise.all([
+      this.symbolOf(this.params.baseAssetAddress),
+      this.symbolOf(this.params.quoteAssetAddress),
+    ]);
     await this.refresh();
     if (!this.wallet) return;
     await this.resyncNonce();
@@ -94,18 +101,29 @@ export class Market {
     await this.initGasLimit();
   }
 
+  /** Ticker for a token. The native asset has no ERC20 symbol(), so it is named here. */
+  private async symbolOf(token: string): Promise<string> {
+    if (token === ZERO_ADDRESS) return "MON";
+    try {
+      const c = new ethers.Contract(token, ["function symbol() view returns (string)"], this.provider);
+      return (await c.symbol()) || token;
+    } catch {
+      return token;
+    }
+  }
+
   /** Every `config.refreshBlocks`: fee estimate, margin balances, and whether the Kuru AMM vault went live. */
   async refresh() {
-    const [fee, vault, mon, usdc] = await Promise.allSettled([
+    const [fee, vault, base, quote] = await Promise.allSettled([
       rpc<string>("eth_gasPrice"),
       readVaultParams(config.readRpcUrl, config.market),
-      this.wallet ? this.marginBalance(ZERO_ADDRESS) : Promise.resolve(null),
+      this.wallet ? this.marginBalance(this.params.baseAssetAddress) : Promise.resolve(null),
       this.wallet ? this.marginBalance(this.params.quoteAssetAddress) : Promise.resolve(null),
     ]);
     if (fee.status === "fulfilled") this.feeWei = BN.from(fee.value);
     if (vault.status === "fulfilled") this.useVault = vaultActive(vault.value);
-    if (mon.status === "fulfilled" && mon.value) this.margin.mon = Number(ethers.utils.formatUnits(mon.value, this.params.baseAssetDecimals.toNumber()));
-    if (usdc.status === "fulfilled" && usdc.value) this.margin.usdc = Number(ethers.utils.formatUnits(usdc.value, this.params.quoteAssetDecimals.toNumber()));
+    if (base.status === "fulfilled" && base.value) this.margin.base = Number(ethers.utils.formatUnits(base.value, this.params.baseAssetDecimals.toNumber()));
+    if (quote.status === "fulfilled" && quote.value) this.margin.quote = Number(ethers.utils.formatUnits(quote.value, this.params.quoteAssetDecimals.toNumber()));
   }
 
   /** One eth_call (two batched into one HTTP request once the vault is live). */
@@ -132,11 +150,11 @@ export class Market {
    * Sign and fire one `batchUpdate`: cancel the given resting orders, post one new post-only limit
    * order. Returns as soon as the RPC has the hash. `pollPending` resolves placed/reverted later.
    */
-  async send(block: number, side: Side, sizeMon: number, book: Book, cancel: number[], capped: boolean): Promise<Quote> {
+  async send(block: number, side: Side, sizeBase: number, book: Book, cancel: number[], capped: boolean): Promise<Quote> {
     const price = this.quotePrice(side, book);
-    if (!this.wallet) return { side, price, size: sizeMon, txHash: null, gasMon: 0, cancel, status: "sim", orderId: null, capped };
+    if (!this.wallet) return { side, price, size: sizeBase, txHash: null, gasMon: 0, cancel, status: "sim", orderId: null, capped };
 
-    const tx = this.buildTx(side, sizeMon, price, cancel);
+    const tx = this.buildTx(side, sizeBase, price, cancel);
     const signed = await this.wallet.signTransaction(tx);
     let hash: string;
     try {
@@ -146,7 +164,7 @@ export class Market {
       await this.resyncNonce().catch(() => {});
       throw e;
     }
-    const quote: Quote = { side, price, size: sizeMon, txHash: hash, gasMon: this.gasMon(this.gasLimit, this.feeWei), cancel, status: "sent", orderId: null, capped };
+    const quote: Quote = { side, price, size: sizeBase, txHash: hash, gasMon: this.gasMon(this.gasLimit, this.feeWei), cancel, status: "sent", orderId: null, capped };
     this.pending.set(hash, { block, quote, gasLimit: this.gasLimit });
     return quote;
   }
@@ -173,18 +191,18 @@ export class Market {
   }
 
   /** The exact transaction the hot loop signs: no pre-send RPC, hardcoded gas limit, static type-2 fees. */
-  buildTx(side: Side, sizeMon: number, price: number, cancel: number[]): ethers.providers.TransactionRequest {
+  buildTx(side: Side, sizeBase: number, price: number, cancel: number[]): ethers.providers.TransactionRequest {
     return {
       type: 2, chainId: config.chainId, to: config.market, nonce: this.nonce, gasLimit: this.gasLimit,
       maxFeePerGas: gwei(config.maxFeeGwei), maxPriorityFeePerGas: gwei(config.priorityFeeGwei),
-      data: this.encode(side, sizeMon, price, cancel), value: BN.from(0),
+      data: this.encode(side, sizeBase, price, cancel), value: BN.from(0),
     };
   }
 
   /** batchUpdate(buyPrices, buySizes, sellPrices, sellSizes, orderIdsToCancel, postOnly). Funds come from the margin account, so value is 0. */
-  encode(side: Side, sizeMon: number, price: number, cancel: number[]): string {
+  encode(side: Side, sizeBase: number, price: number, cancel: number[]): string {
     const priceU = BN.from(Math.round(price * 10 ** this.priceDec));
-    const sizeU = ethers.utils.parseUnits(sizeMon.toFixed(this.sizeDec), this.sizeDec);
+    const sizeU = ethers.utils.parseUnits(sizeBase.toFixed(this.sizeDec), this.sizeDec);
     const [bp, bs, sp, ss] = side === "buy" ? [[priceU], [sizeU], [], []] : [[], [], [priceU], [sizeU]];
     return this.iface.encodeFunctionData("batchUpdate", [bp, bs, sp, ss, cancel.map((id) => BN.from(id)), true]);
   }
@@ -207,41 +225,44 @@ export class Market {
     return { block: p.block, quote: { ...p.quote, status, orderId, gasMon }, canceled };
   }
 
-  /** Top the margin account up to MARGIN_MON / MARGIN_USDC. Runs once at startup, awaiting each receipt. */
+  /** Top the margin account up to MARGIN_BASE / MARGIN_QUOTE. Runs once at startup, awaiting each receipt. */
   private async ensureMargin() {
     const w = this.wallet!;
     const baseDec = this.params.baseAssetDecimals.toNumber(), quoteDec = this.params.quoteAssetDecimals.toNumber();
-    const [monBal, usdcBal] = await Promise.all([this.marginBalance(ZERO_ADDRESS), this.marginBalance(this.params.quoteAssetAddress)]);
-    const mon = Number(ethers.utils.formatUnits(monBal, baseDec)), usdc = Number(ethers.utils.formatUnits(usdcBal, quoteDec));
-    const deposit = async (token: string, amount: ethers.BigNumber, native: boolean) => {
-      const tx = await w.sendTransaction({
-        to: config.marginAccount, nonce: this.nonce++, value: native ? amount : BN.from(0),
-        data: this.marginIface.encodeFunctionData("deposit", [w.address, token, amount]),
-      });
-      await tx.wait(1);
+    const [baseBal, quoteBal] = await Promise.all([
+      this.marginBalance(this.params.baseAssetAddress),
+      this.marginBalance(this.params.quoteAssetAddress),
+    ]);
+    const base = Number(ethers.utils.formatUnits(baseBal, baseDec)), quote = Number(ethers.utils.formatUnits(quoteBal, quoteDec));
+
+    /**
+     * Native MON rides along as tx value; every ERC20 (including an ERC20 base asset) needs an
+     * approve first, and we deposit only what the wallet actually holds rather than reverting.
+     */
+    const deposit = async (token: string, decimals: number, want: number, symbol: string) => {
+      const have = Number(ethers.utils.formatUnits(await this.marginBalance(token), decimals));
+      if (have >= want) return;
+      const amt = ethers.utils.parseUnits((want - have).toFixed(Math.min(decimals, 8)), decimals);
+      if (token === ZERO_ADDRESS) {
+        console.log(`margin: depositing ${ethers.utils.formatUnits(amt, decimals)} ${symbol}`);
+        await (await w.sendTransaction({ to: config.marginAccount, nonce: this.nonce++, value: amt, data: this.marginIface.encodeFunctionData("deposit", [w.address, token, amt]) })).wait(1);
+        return;
+      }
+      const erc20 = new ethers.Contract(token, ERC20_ABI, w);
+      const available: ethers.BigNumber = await erc20.balanceOf(w.address);
+      if (available.lt(amt)) console.warn(`margin: wallet has ${ethers.utils.formatUnits(available, decimals)} ${symbol}, wanted ${ethers.utils.formatUnits(amt, decimals)}; depositing what is there`);
+      const dep = available.lt(amt) ? available : amt;
+      if (dep.lte(0)) return;
+      const allowance: ethers.BigNumber = await erc20.allowance(w.address, config.marginAccount);
+      if (allowance.lt(dep)) { const tx = await erc20.approve(config.marginAccount, ethers.constants.MaxUint256, { nonce: this.nonce++ }); await tx.wait(1); }
+      console.log(`margin: depositing ${ethers.utils.formatUnits(dep, decimals)} ${symbol}`);
+      await (await w.sendTransaction({ to: config.marginAccount, nonce: this.nonce++, value: BN.from(0), data: this.marginIface.encodeFunctionData("deposit", [w.address, token, dep]) })).wait(1);
     };
-    if (mon < config.marginMon) {
-      const amt = ethers.utils.parseUnits((config.marginMon - mon).toFixed(6), baseDec);
-      console.log(`margin: depositing ${ethers.utils.formatUnits(amt, baseDec)} MON`);
-      await deposit(ZERO_ADDRESS, amt, true);
-    }
-    if (usdc < config.marginUsdc) {
-      const token = new ethers.Contract(this.params.quoteAssetAddress, ERC20_ABI, w);
-      const amt = ethers.utils.parseUnits((config.marginUsdc - usdc).toFixed(quoteDec), quoteDec);
-      const have: ethers.BigNumber = await token.balanceOf(w.address);
-      if (have.lt(amt)) {
-        console.warn(`margin: wallet has ${ethers.utils.formatUnits(have, quoteDec)} USDC, wanted to deposit ${ethers.utils.formatUnits(amt, quoteDec)}; depositing what is there`);
-      }
-      const dep = have.lt(amt) ? have : amt;
-      if (dep.gt(0)) {
-        const allowance: ethers.BigNumber = await token.allowance(w.address, config.marginAccount);
-        if (allowance.lt(dep)) { const tx = await token.approve(config.marginAccount, ethers.constants.MaxUint256, { nonce: this.nonce++ }); await tx.wait(1); }
-        console.log(`margin: depositing ${ethers.utils.formatUnits(dep, quoteDec)} USDC`);
-        await deposit(this.params.quoteAssetAddress, dep, false);
-      }
-    }
+
+    await deposit(this.params.baseAssetAddress, baseDec, config.marginBase, this.baseSymbol);
+    await deposit(this.params.quoteAssetAddress, quoteDec, config.marginQuote, this.quoteSymbol);
     await this.refresh();
-    console.log(`margin · ${this.margin.mon.toFixed(2)} MON · ${this.margin.usdc.toFixed(2)} USDC`);
+    console.log(`margin · ${this.margin.base.toFixed(6)} ${this.baseSymbol} · ${this.margin.quote.toFixed(2)} ${this.quoteSymbol}`);
   }
 
   private async marginBalance(token: string): Promise<ethers.BigNumber> {
@@ -259,8 +280,8 @@ export class Market {
     else {
       try {
         const book = await this.readBook();
-        const side: Side = this.margin.usdc >= config.tradeSizeMon * book.ask ? "buy" : "sell";
-        const data = this.encode(side, config.tradeSizeMon, this.quotePrice(side, book), []);
+        const side: Side = this.margin.quote >= config.tradeSizeBase * book.ask ? "buy" : "sell";
+        const data = this.encode(side, config.tradeSizeBase, this.quotePrice(side, book), []);
         const est = await this.provider.estimateGas({ to: config.market, from: this.wallet!.address, data });
         this.gasLimit = est.add(90_000).mul(115).div(100);
       } catch (e) {

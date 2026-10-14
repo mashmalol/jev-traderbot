@@ -11,9 +11,24 @@ export function fmtInt(n: number | null | undefined): string {
   return INT.format(Math.round(safe(n)));
 }
 
-/** 0.0222354 -> "0.022235" (6 decimals, MON/USDC ticks) */
+/** "cbBTC/USDC" -> "cbBTC"; the base half of a pair label. */
+export function baseSymbol(pair: string | null | undefined): string {
+  return (pair ?? "").split("/")[0] || "";
+}
+
+/** "cbBTC/USDC" -> "USDC". */
+export function quoteSymbol(pair: string | null | undefined): string {
+  return (pair ?? "").split("/")[1] || "";
+}
+
+/**
+ * Adaptive so it reads the same at either end of the range: a sub-dollar pair like MON/USDC
+ * needs 6dp, while a BTC-sized price at 6dp is all trailing zeros.
+ */
 export function fmtPrice(n: number | null | undefined): string {
-  return safe(n).toFixed(6);
+  const v = safe(n);
+  const a = Math.abs(v);
+  return a >= 1000 ? v.toFixed(2) : a >= 1 ? v.toFixed(4) : v.toFixed(6);
 }
 
 /** 0.0045 -> "$0.0045"; negatives -> "-$0.0045" */
@@ -22,9 +37,21 @@ export function fmtUsd(n: number | null | undefined, d = 4): string {
   return `${v < 0 ? "-" : ""}$${Math.abs(v).toFixed(d)}`;
 }
 
-/** 0.0213 -> "0.021 MON" */
-export function fmtMon(n: number | null | undefined, d = 3): string {
-  return `${safe(n).toFixed(d)} MON`;
+/**
+ * About four significant digits, so 200 and 0.01 are both readable. Unlike a fixed rule this keeps
+ * a near-zero pnl as "+0.00" instead of trailing eight decimals.
+ */
+function adaptiveDp(v: number): number {
+  const a = Math.abs(v);
+  if (a === 0 || !Number.isFinite(a)) return 2;
+  const intDigits = Math.floor(Math.log10(a)) + 1;
+  return Math.max(0, Math.min(8, 4 - intDigits));
+}
+
+/** 0.0213 -> "0.0213 cbBTC"; 200 -> "200 cbBTC" */
+export function fmtBase(n: number | null | undefined, sym = ""): string {
+  const v = safe(n);
+  return `${v.toFixed(adaptiveDp(v))}${sym ? ` ${sym}` : ""}`;
 }
 
 /** 0.62 -> "62%" */
@@ -43,9 +70,9 @@ export function fmtSigned(n: number | null | undefined, d = 3): string {
   return `${v >= 0 ? "+" : "-"}${Math.abs(v).toFixed(d)}`;
 }
 
-/** -0.0012 -> "-0.001 MON"; 0.003 -> "+0.003 MON" */
-export function fmtSignedMon(n: number | null | undefined, d = 3): string {
-  return `${fmtSigned(n, d)} MON`;
+/** -0.0012 -> "-0.0012 cbBTC"; 0.003 -> "+0.003 cbBTC" */
+export function fmtSignedBase(n: number | null | undefined, sym = ""): string {
+  return `${fmtSigned(safe(n), adaptiveDp(safe(n)))}${sym ? ` ${sym}` : ""}`;
 }
 
 /** 0.0012 (a ratio) -> "+0.12%" */

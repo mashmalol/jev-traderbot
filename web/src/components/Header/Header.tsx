@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import RunToggle from "@/components/RunToggle/RunToggle";
 import type { BlockEvent, ConnectionState, Meta } from "@/lib/types";
 import { fmtInt, shortAddr } from "@/lib/format";
 import styles from "./Header.module.css";
@@ -9,6 +10,8 @@ export interface HeaderProps {
   meta: Meta | null;
   latest: BlockEvent | null;
   connection: ConnectionState;
+  running: boolean;
+  apiUrl: string;
 }
 
 /** Only shown when we are NOT live. Live is the silent, default state. */
@@ -17,7 +20,7 @@ const OFFLINE_LABEL: Partial<Record<ConnectionState, string>> = {
   reconnecting: "reconnecting",
 };
 
-export default function Header({ meta, latest, connection }: HeaderProps) {
+export default function Header({ meta, latest, connection, running, apiUrl }: HeaderProps) {
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -55,6 +58,12 @@ export default function Header({ meta, latest, connection }: HeaderProps) {
       <span className={styles.spacer} />
 
       {offline ? <span className={styles.offline}>{offline}</span> : null}
+
+      {/* stopped reads the same way offline does: static, muted, no animation. Without it a frozen
+          block number and a still chart look like a crashed feed rather than a deliberate pause. */}
+      {!running ? <span className={styles.offline}>stopped</span> : null}
+
+      <RunToggle running={running} apiUrl={apiUrl} />
 
       <button
         type="button"

@@ -6,6 +6,7 @@ import styles from "./DecisionPanel.module.css";
 
 export interface DecisionPanelProps {
   latest: BlockEvent | null;
+  pair: string;
 }
 
 type Chosen = "buy" | "sell" | null;
@@ -47,7 +48,7 @@ function BarRow({ label, labelColor, active, value, fill, pct }: BarRowProps) {
   );
 }
 
-export default function DecisionPanel({ latest }: DecisionPanelProps) {
+export default function DecisionPanel({ latest, pair }: DecisionPanelProps) {
   const decision = latest?.decision ?? null;
   const late = decision ? decision.late : true;
   // "hold" is treated as a non-decision, exactly as the feed does.
@@ -73,7 +74,7 @@ export default function DecisionPanel({ latest }: DecisionPanelProps) {
       <section className={styles.section}>
         <div className={styles.sectionLabel}>STANDING ORDER</div>
         <div className={styles.order}>
-          {"> post a bid or an ask on Kuru's MON/USDC book. every block. no abstaining."}
+          {`> post a bid or an ask on Kuru's ${pair} book. every block. no abstaining.`}
         </div>
       </section>
 

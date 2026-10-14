@@ -1,0 +1,48 @@
+.button {
+  appearance: none;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  padding: 7px 14px;
+  font-family: var(--font-mono), "Geist Mono", ui-monospace, monospace;
+  font-weight: 500;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, color 0.2s, opacity 0.2s;
+}
+
+/* running: "stop" is the destructive option, so it stays quiet until you reach for it */
+.stop {
+  background: transparent;
+  border-color: var(--border-2);
+  color: var(--ink-2);
+}
+
+.stop:hover:not(:disabled) {
+  border-color: var(--sell-bar);
+  color: var(--sell-ink);
+}
+
+/* stopped: "begin" is the only way back, so it is the one filled pill on the page */
+.begin {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--bg);
+}
+
+.begin:hover:not(:disabled) {
+  background: var(--ink-2);
+  border-color: var(--ink-2);
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button {
+    transition: none;
+  }
+}

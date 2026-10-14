@@ -12,19 +12,20 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://jev-trader-productio
 
 export default function Page() {
   const feed = useFeed(API_URL);
+  const pair = feed.meta?.pair ?? "";
 
   return (
     <div className="card">
-      <Header meta={feed.meta} latest={feed.latest} connection={feed.connection} />
+      <Header meta={feed.meta} latest={feed.latest} connection={feed.connection} running={feed.running} apiUrl={API_URL} />
       <StatsRow latest={feed.latest} avgLatencyMs={feed.avgLatencyMs} meta={feed.meta} />
       <div className={styles.main}>
         <div className={styles.left}>
           <div className={styles.chartWrap}>
-            <FlowChart events={feed.events} latest={feed.latest} />
+            <FlowChart events={feed.events} latest={feed.latest} pair={pair} />
           </div>
         </div>
         <div className={styles.right}>
-          <DecisionPanel latest={feed.latest} />
+          <DecisionPanel latest={feed.latest} pair={pair} />
           <Feed events={feed.events} />
         </div>
       </div>
